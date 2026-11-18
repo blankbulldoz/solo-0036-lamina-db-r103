@@ -7,19 +7,26 @@ import (
 	"fmt"
 	"io"
 	"lamina/internal/catalog"
+	"lamina/internal/identity"
 	"lamina/internal/versions"
 	"os"
 )
 
 const MaxImage = 128 << 20
 
+// Image is the frozen state written to a checkpoint or exported as a backup.
+// Format 2 images carry the instance identity they belong to; format 1 images
+// are the identity-less legacy layout and are only accepted by explicit
+// migration/restore paths.
 type Image struct {
-	Format   int              `json:"format"`
-	Sequence uint64           `json:"sequence"`
-	Horizon  uint64           `json:"horizon"`
-	Catalog  *catalog.Catalog `json:"catalog"`
-	Store    *versions.Store  `json:"store"`
+	Format     int                  `json:"format"`
+	Sequence   uint64               `json:"sequence"`
+	Horizon    uint64               `json:"horizon"`
+	Provenance *identity.Provenance `json:"provenance,omitempty"`
+	Catalog    *catalog.Catalog     `json:"catalog"`
+	Store      *versions.Store      `json:"store"`
 }
+
 type Envelope struct {
 	Format  int             `json:"format"`
 	Digest  string          `json:"sha256"`
@@ -27,35 +34,81 @@ type Envelope struct {
 }
 
 func Encode(image Image) ([]byte, error) {
-	image.Format = 1
+	if image.Format != identity.CurrentFormat {
+		return nil, fmt.Errorf("refusing to encode image format %d", image.Format)
+	}
+	if image.Provenance == nil {
+		return nil, fmt.Errorf("refusing to encode image without instance identity")
+	}
 	b, err := json.Marshal(image)
 	if err != nil {
 		return nil, err
 	}
 	h := sha256.Sum256(b)
-	return json.Marshal(Envelope{Format: 1, Digest: hex.EncodeToString(h[:]), Payload: b})
+	return json.Marshal(Envelope{Format: identity.CurrentFormat, Digest: hex.EncodeToString(h[:]), Payload: b})
 }
+
+// Decode accepts only identity-bearing images. It is the serving-path reader.
 func Decode(b []byte) (Image, error) {
-	var image Image
-	var env Envelope
-	if len(b) > MaxImage {
-		return image, fmt.Errorf("image exceeds limit")
-	}
-	if err := json.Unmarshal(b, &env); err != nil {
+	image, legacy, err := DecodeCompat(b)
+	if err != nil {
 		return image, err
 	}
-	h := sha256.Sum256(env.Payload)
-	if env.Format != 1 || hex.EncodeToString(h[:]) != env.Digest {
-		return image, fmt.Errorf("image format or digest mismatch")
-	}
-	if err := json.Unmarshal(env.Payload, &image); err != nil {
-		return image, err
-	}
-	if err := Validate(image); err != nil {
-		return image, err
+	if legacy {
+		return image, fmt.Errorf("legacy image has no instance identity; run the upgrade or restore it with -restore")
 	}
 	return image, nil
 }
+
+// DecodeCompat accepts both the current image format and the identity-less
+// legacy format. The legacy flag tells callers they must adopt the image
+// explicitly rather than treat it as belonging to an existing instance.
+func DecodeCompat(b []byte) (Image, bool, error) {
+	var image Image
+	var env Envelope
+	if len(b) > MaxImage {
+		return image, false, fmt.Errorf("image exceeds limit")
+	}
+	if err := json.Unmarshal(b, &env); err != nil {
+		return image, false, err
+	}
+	h := sha256.Sum256(env.Payload)
+	if env.Format != identity.LegacyFormat && env.Format != identity.CurrentFormat {
+		return image, false, fmt.Errorf("image envelope format %d not supported", env.Format)
+	}
+	if hex.EncodeToString(h[:]) != env.Digest {
+		return image, false, fmt.Errorf("image digest mismatch")
+	}
+	if err := json.Unmarshal(env.Payload, &image); err != nil {
+		return image, false, err
+	}
+	if image.Format != env.Format {
+		return image, false, fmt.Errorf("image format %d does not match envelope format %d", image.Format, env.Format)
+	}
+	if env.Format == identity.LegacyFormat {
+		if image.Provenance != nil {
+			return image, false, fmt.Errorf("legacy image must not carry instance identity")
+		}
+		if err := validateBody(image); err != nil {
+			return image, false, err
+		}
+		return image, true, nil
+	}
+	if !identity.CompatibleFormat(image.Format) {
+		return image, false, fmt.Errorf("image format %d outside readable range %s", image.Format, identity.CompatibleRange())
+	}
+	if image.Provenance == nil {
+		return image, false, fmt.Errorf("image has no instance identity")
+	}
+	if err := image.Provenance.Check(); err != nil {
+		return image, false, fmt.Errorf("image identity: %w", err)
+	}
+	if err := Validate(image); err != nil {
+		return image, false, err
+	}
+	return image, false, nil
+}
+
 func Read(path string) (Image, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -68,8 +121,36 @@ func Read(path string) (Image, error) {
 	}
 	return Decode(b)
 }
+
+func ReadCompat(path string) (Image, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Image{}, false, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, MaxImage+1))
+	if err != nil {
+		return Image{}, false, err
+	}
+	return DecodeCompat(b)
+}
+
 func Validate(image Image) error {
-	if image.Format != 1 || image.Horizon > image.Sequence || image.Catalog == nil || image.Store == nil || image.Catalog.Relations == nil || image.Catalog.Indexes == nil || image.Store.Tables == nil {
+	if image.Format != identity.CurrentFormat {
+		return fmt.Errorf("invalid image format %d", image.Format)
+	}
+	if image.Provenance == nil {
+		return fmt.Errorf("image has no instance identity")
+	}
+	if err := image.Provenance.Check(); err != nil {
+		return fmt.Errorf("image identity: %w", err)
+	}
+	return validateBody(image)
+}
+
+// validateBody checks the structural invariants shared by both formats.
+func validateBody(image Image) error {
+	if image.Horizon > image.Sequence || image.Catalog == nil || image.Store == nil || image.Catalog.Relations == nil || image.Catalog.Indexes == nil || image.Store.Tables == nil {
 		return fmt.Errorf("invalid image header")
 	}
 	for name, r := range image.Catalog.Relations {
@@ -133,6 +214,5 @@ func Validate(image Image) error {
 			seen[value.Key()] = true
 		}
 	}
-
 	return nil
 }

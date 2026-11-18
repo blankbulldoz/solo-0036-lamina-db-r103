@@ -38,6 +38,9 @@ func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	_, _ = w.Write(data)
 }
+func (s *Server) identity(w http.ResponseWriter, r *http.Request) {
+	write(w, 200, s.db.Identity())
+}
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	out, err := s.db.Stats()
 	if err != nil {

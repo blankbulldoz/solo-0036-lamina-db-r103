@@ -7,13 +7,14 @@ type ChangePage struct {
 	Cursor      uint64           `json:"cursor"`
 	Head        uint64           `json:"head"`
 	HistoryBase uint64           `json:"history_base"`
+	Instance    string           `json:"instance"`
 	More        bool             `json:"more"`
 }
 
 func (d *DB) Changes(after uint64, limit int) (ChangePage, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	out := ChangePage{Records: []journal.Record{}, Cursor: after, Head: d.sequence, HistoryBase: d.wal.Base}
+	out := ChangePage{Records: []journal.Record{}, Cursor: after, Head: d.sequence, HistoryBase: d.wal.Base, Instance: d.provenance.Instance}
 	if err := d.usable(); err != nil {
 		return out, err
 	}

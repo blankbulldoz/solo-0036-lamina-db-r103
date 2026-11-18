@@ -16,6 +16,16 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "upgrade", "rollback", "recover":
+			if err := migrateCommand(os.Args[1], os.Args[2:]); err != nil {
+				slog.Error("lamina "+os.Args[1]+" failed", "error", err)
+				os.Exit(2)
+			}
+			return
+		}
+	}
 	if err := run(); err != nil {
 		slog.Error("lamina stopped", "error", err)
 		os.Exit(1)

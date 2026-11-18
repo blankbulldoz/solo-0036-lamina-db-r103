@@ -7,7 +7,7 @@ import (
 )
 
 func (d *DB) apply(r journal.Record) error {
-	if r.Sequence != d.sequence+1 || r.Format != 1 {
+	if r.Sequence != d.sequence+1 || r.Format != d.format {
 		return fmt.Errorf("invalid record sequence")
 	}
 	switch r.Kind {

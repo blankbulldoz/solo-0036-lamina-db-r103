@@ -98,6 +98,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET "+p+"/backup", s.backup)
 	s.mux.HandleFunc("GET "+p+"/changes", s.changes)
 	s.mux.HandleFunc("GET "+p+"/stats", s.stats)
+	s.mux.HandleFunc("GET "+p+"/identity", s.identity)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	stats, err := s.db.Stats()
@@ -105,5 +106,5 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		respondError(w, err)
 		return
 	}
-	write(w, 200, map[string]any{"status": "ready", "sequence": stats.Sequence})
+	write(w, 200, map[string]any{"status": "ready", "sequence": stats.Sequence, "instance": stats.Instance})
 }
